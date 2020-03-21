@@ -50,7 +50,9 @@ is_this_class <- function(obj, current_class){
                  "matrix",
                  "data.frame",
                  "factor",
-                 "vcfR")
+                 "vcfR",
+                 "dist",
+                 "list")
   if (!(current_class %in% r_classes)) {
     stop("current_class is expected to be a R class")
   }
@@ -163,7 +165,10 @@ clean_up_cds_name_from_gff <- function(gff){
   return(gff)
 }
 
-#' Read in variant data from a VCF file or vcfR object
+#' Read in variant data from a VCF file or vcfR object prepared
+#'
+#' @description This function can now handle the multiVCF as prepared by
+#'   bcftools / snpeff
 #'
 #' @param vcf Either character or vcfR. If character, it is a path to a VCF
 #'   file.
@@ -171,27 +176,73 @@ clean_up_cds_name_from_gff <- function(gff){
 #' @return vcf_geno_mat: Matrix.
 load_vcf_file <- function(vcf) {
   if (is_file(vcf)) {
-    vcf <- vcfR::read.vcfR(file = vcf)
+    vcf <- vcfR::read.vcfR(file = vcf, convertNA = FALSE)
   }
   check_is_this_class(vcf, "vcfR")
 
-  vcf_geno_mat <- vcf@gt[, 2:ncol(vcf@gt), drop = FALSE]
+  vcf_geno_mat <- vcf@gt
+  vcf_geno_mat <- vcf_geno_mat[, colnames(vcf_geno_mat) != "FORMAT"]
+
   row.names(vcf_geno_mat) <- vcf@fix[, colnames(vcf@fix) == "POS", drop = TRUE]
   vcf_ref_allele <- vcf@fix[, colnames(vcf@fix) == "REF", drop = TRUE]
   vcf_alt_allele <- vcf@fix[, colnames(vcf@fix) == "ALT", drop = TRUE]
 
+  geno_to_remove <- NULL
   for (i in 1:nrow(vcf_geno_mat)) {
     alt_alleles <- strsplit(vcf_alt_allele[i], split = ",")
-    vcf_alt_allele_1 <- alt_alleles[[1]][1]
-    vcf_alt_allele_2 <- alt_alleles[[1]][2]
-    vcf_alt_allele_3 <- alt_alleles[[1]][3]
+    num_alt_alleles <- length(alt_alleles[[1]])
 
+    # Simplify indel encoding from bcftools/snpeff for reference allele
+    vcf_geno_mat[i, grepl(pattern = "^[.][/][.]", x = vcf_geno_mat[i, ])] <- "0"
+
+    # Recode reference allele to character
     vcf_geno_mat[i, vcf_geno_mat[i, ] == "0"] <- vcf_ref_allele[i]
-    vcf_geno_mat[i, vcf_geno_mat[i, ] == "1"] <- vcf_alt_allele_1
-    vcf_geno_mat[i, vcf_geno_mat[i, ] == "2"] <- vcf_alt_allele_2
-    vcf_geno_mat[i, vcf_geno_mat[i, ] == "3"] <- vcf_alt_allele_3
+
+    for (j in 1:num_alt_alleles) {
+      # Simplify indel encoding from bcftools/snpeff
+      vcf_geno_mat[i,
+                   grepl(pattern = paste0("^", j, "[/]", j),
+                         x = vcf_geno_mat[i, ])] <- j
+
+      # Recode numbers to allele characters
+      vcf_geno_mat[i, vcf_geno_mat[i, ] == j] <- alt_alleles[[1]][j]
+    }
+
+    if (sum(
+      vcf_geno_mat[i, grepl(pattern = "[/]", x = vcf_geno_mat[i, ])] > 0)) {
+      geno_to_remove <- c(geno_to_remove, i)
+    }
   }
-  return(vcf_geno_mat)
+
+  if (!is.null(geno_to_remove)) {
+    warning(
+      paste0("Removing ",
+             length(geno_to_remove),
+             " rows with heterozygous calls"))
+    vcf_geno_mat <- vcf_geno_mat[-geno_to_remove, , drop = FALSE]
+    vcf_alt_allele <- vcf_alt_allele[-geno_to_remove]
+    vcf_ref_allele <- vcf_ref_allele[-geno_to_remove]
+  }
+
+  # Get SNPeff annotations, if they exist
+  if (length(grep("SnpEff", vcf@meta)) > 0) {
+    # Extract annotations
+    snpeff_pred <- vcfR::extract_info_tidy(vcf, info_fields = "ANN")
+    # Get unique annotations
+    snpeff_pred <- sapply(snpeff_pred$ANN,
+                          function(s){unique(unlist((strsplit(s, ","))))})
+    snpeff_pred <- unname(snpeff_pred)
+
+    if (!is.null(geno_to_remove)) {
+      snpeff_pred <- snpeff_pred[-geno_to_remove]
+    }
+  } else {
+    snpeff_pred <- NULL
+  }
+  return(list("vcf_geno_mat" = vcf_geno_mat,
+              "vcf_ref_allele" = vcf_ref_allele,
+              "vcf_alt_allele" = vcf_alt_allele,
+              "snpeff_pred" = snpeff_pred))
 }
 
 #' Confirm that the tree and variant matrix contain exactly the same samples
@@ -218,5 +269,43 @@ check_if_binary_matrix <- function(mat) {
 
   if (sum(!(mat %in% c(0, 1))) > 0) {
     stop("Matrix should be only 1s and 0s")
+  }
+}
+
+#' Check that the user supplied valid snpeff annotation groups
+#'
+#' @description Doesn't return anything. Stops prewas() from running if the
+#'   user provided inputs are invalid.
+#' @param snpeff_grouping NULL or vector of characters:
+#'   c('HIGH','MODERATE', LOW', 'MODIFER')
+#'
+#' @noRd
+check_snpeff_user_input <- function(snpeff_grouping){
+  valid_annots <- c("MODERATE", "MODIFIER", "LOW", "HIGH")
+  if (!is.null(snpeff_grouping)) {
+    check_is_this_class(snpeff_grouping, "character")
+    if (!sum(snpeff_grouping %in% valid_annots) > 0) {
+      stop("If a user supplies asnpeff_grouping input, create a vector combination of 'HIGH','MODERATE', LOW', and/or 'MODIFER'. Must write the impact combinations in all caps (e.g. c('HIGH', 'MODERATE')).")
+    }
+  }
+}
+
+#' Check that the number of annotations match the number of genes at a position
+#'
+#' @description Doesn't return anything. Stops prewas() from running if the
+#'   user provided inputs are invalid.
+#' @param predicted_impact Character vector of snpeff predicted impact. Pipe
+#' delimited when overlapping genes.
+#' @param gene Character vector of genes/locus tag. Pipe
+#' delimited when overlapping genes.
+#' @noRd
+check_num_overlap_genes_match_num_impact <- function(predicted_impact, gene) {
+  num_annots <- sapply(predicted_impact, function(p) {
+    length(unlist(strsplit(p, "[|]")))
+  })
+  num_genes <- sapply(gene, function(g) {
+    length(unlist(strsplit(g, "[|]")))  })
+  if (sum(unname(num_annots) != unname(num_genes)) != 0) {
+    stop("Number of annotations do not match the number of genes at at least 1 position")
   }
 }

@@ -34,6 +34,7 @@ make_all_tree_edges_positive <- function(tree){
 #'   position. Names are the genomic loci. Values are the nucleotides.
 #' @noRd
 get_major_alleles <- function(allele_mat){
+  check_is_this_class(allele_mat, "matrix")
   major_allele <- apply(allele_mat, 1, function(x) {
     names(which.max(table(x)))
   })
@@ -88,6 +89,7 @@ get_ancestral_alleles <- function(tree, mat){
   }))
   ar_all <- data.frame(ar_all)
   colnames(ar_all) <- c("ancestral_allele", "probability")
+ ar_all$ancestral_allele <- as.factor(ar_all$ancestral_allele)
 
   return(list(ar_results = ar_all, tree = tree))
 }
@@ -102,8 +104,14 @@ get_ancestral_alleles <- function(tree, mat){
 #' @param alleles Factor. Vector of reference alleles (ancestral alleles or
 #'   major alleles)
 #' @param ar_results Data.frame. Results from ancestral reconstruction
-#'
-#' @return A list of three objects:
+#' @param o_ref Character vector. Original reference alleles. Length = Number of
+#'   genotypes.
+#' @param o_alt Character vector. Original alternative alleles. Length = Number
+#'   of genotypes.
+#' @param snpeff NULL or list of character vectors. If list, then length(list) =
+#'   Number of genotypes. Each list entry can have one or more SnpEff
+#'   annotations.
+#' @return A list of six objects:
 #'   \describe{
 #'     \item{allele_mat}{Matrix. Rows are variants. Columns are samples.}
 #'     \item{ar_results}{Data.frame. Variants with unknown ancestral states
@@ -111,12 +119,38 @@ get_ancestral_alleles <- function(tree, mat){
 #'     first column in ancestral allele & second column is probability. If no
 #'     ancestral reconstruction performed: the only column is the major allele.}
 #'     \item{removed}{Character. Vector with names of removed samples.}
+#'     \item{o_ref}{Character vector. Original reference alleles. Length =
+#'     Number of genotypes with unknown alleles.}
+#'     \item{o_alt}{Character vector. Original alternative alleles. Length =
+#'      Number of genotype after remove genotypes with unknown alleles.}
+#'     \item{snpeff}{NULL or list of character vectors. If list, then
+#'     length(list) = Number of genotypes with unknown alleles. Each list
+#'     entry can have one or more SnpEff annotations.}
 #'   }
 #' @noRd
-remove_unknown_alleles <- function(allele_mat, alleles, ar_results){
+remove_unknown_alleles <- function(allele_mat,
+                                   alleles,
+                                   ar_results,
+                                   o_ref,
+                                   o_alt,
+                                   snpeff){
   check_is_this_class(allele_mat, "matrix")
   check_is_this_class(alleles, "factor")
   check_is_this_class(ar_results, "data.frame")
+  if (length(o_ref) != length(o_alt)) {
+    stop("o_ref and o_alt need to have same length")
+  }
+  if (length(o_ref) != nrow(allele_mat)) {
+    stop("o_ref & o_alt need to have an entry for every mat row")
+  }
+  if (!is.null(snpeff)) {
+    check_is_this_class(snpeff, "list")
+    check_is_this_class(snpeff[[1]], "character")
+    if (length(snpeff) != length(o_ref)) {
+      stop("If not null snpeff needs to have an entry for every row in mat")
+    }
+  }
+
 
   unknown <- alleles %in% c("-", "N")
   removed <- rownames(allele_mat)[unknown]
@@ -126,6 +160,9 @@ remove_unknown_alleles <- function(allele_mat, alleles, ar_results){
   }
   return(list(allele_mat = allele_mat[!unknown, ],
               ar_results = ar_results[!unknown, , drop = FALSE],
+              snpeff = snpeff[!unknown],
+              o_ref = o_ref[!unknown],
+              o_alt = o_alt[!unknown],
               removed = removed))
 }
 
@@ -138,50 +175,121 @@ remove_unknown_alleles <- function(allele_mat, alleles, ar_results){
 #'
 #' @param allele_mat Matrix. Allele matrix (split by multi-allelic site). Rows
 #'   are variants. Columns are samples.
-#' @param reference_allele Factor. Vector of alleles that are 0 in binary matrix
-#'   (ancestral allele or major allele). Named vector. Names are genetic loci.
+#' @param n_ref Character vector. New reference allele after re-referening.
+#'   Either major allele or ancetral allele. Length = Number of genotypes.
+#' @param o_ref Character vector. Original reference alleles. Length = Number of
+#'   genotypes.
+#' @param o_alt Character vector. Original alternative alleles. Length = Number
+#'   of genotypes.
 #'
-#' @return bin_mat. Matrix. Binary matrix of variant presence/absence.
+#' @return list of two elements:
+#'   \describe{
+#'     \item{bin_mat.}{Matrix. Binary matrix of variant presence/absence.}
+#'     \item{n_alt.}{Character vector. Alternative allele after referencing to
+#'      the major allele or ancestral allele.}
+#'   }
 #' @noRd
-make_binary_matrix <- function(allele_mat, reference_allele){
-  check_is_this_class(reference_allele, "factor")
+make_binary_matrix <- function(allele_mat, o_ref, n_ref, o_alt){
+  check_is_this_class(n_ref, "factor")
+
+  if (length(o_ref) != length(n_ref)) {
+    stop("o_ref and n_ref need to have same length")
+  }
+
   check_is_this_class(allele_mat, "matrix")
+  if (length(o_ref) != length(o_alt)) {
+    stop("o_ref and o_alt need to have same length")
+  }
+  if (length(o_ref) != nrow(allele_mat)) {
+    stop("o_ref & o_alt need to have an entry for every allele_mat row")
+  }
 
   # make matrix of reference allele that's the same size as the allele matrix
-  ref_allele_mat <- replicate(ncol(allele_mat), reference_allele)
+  ref_allele_mat <- replicate(ncol(allele_mat), n_ref)
   # initialize binary matrix
   bin_mat <- allele_mat
   # if allele is the reference allele, code it as 0
   bin_mat[bin_mat == ref_allele_mat] <- 0
-  # get variant positions
-  sites <- unique(gsub("\\..*", "", rownames(bin_mat)))
-  # iterate over each site (to handle multiallelic sites)
-  bin_mat <- sapply(sites, function(x) {
-    site <- bin_mat[rownames(bin_mat) == x, ] # get 1st site
-    # get all bases at that position
-    bases <- unique(site)
-    # remove reference (0) and unknown (N) bases
-    bases <- bases[bases != "0" & bases != "N"]
-    # create mini-matrix for this variant position where rows are bases and
-    # columns are samples
-    binsplit <- matrix(NA, nrow = length(bases), ncol = ncol(bin_mat))
-    rownames(binsplit) <- bases
-    # for each base, code that base as 1 and all others as 0
-    for (b in bases) {
-      binsite <- site
-      binsite[binsite != b] <- 0
-      binsite[binsite == b] <- 1
-      binsite <- as.numeric(binsite)
-      binsplit[b, ] <- binsite
+
+  # initialize n_alt (new alternative allele)
+  n_alt <-  rep(NA, length(o_alt))
+
+  # assign new alternative (after new reference)
+  for (i in 1:length(o_alt)) {
+    if (n_ref[i] == o_alt[i]) {
+      n_alt[i] <- o_ref[i]
+    }else{
+      n_alt[i] <- o_alt[i]
     }
-    return(binsplit)
-  })
-  # change from list to matrix
-  bin_mat <- do.call(rbind, bin_mat)
+  }
+
+  # iterate over each row in bin_mat
+  for (j in 1:nrow(bin_mat)) {
+    bin_mat[j, bin_mat[j, ] != n_alt[j]] <- 0
+    bin_mat[j, bin_mat[j, ] == n_alt[j]] <- 1
+  }
+
   # update rownames and colnames of  binary matrix
   rownames(bin_mat) <- rownames(allele_mat)
   colnames(bin_mat) <- colnames(allele_mat)
+
   # make binary matrix numeric
   class(bin_mat) <- "numeric"
-  return(bin_mat)
+  return(list(bin_mat, n_alt))
+}
+
+#' Get SnpEff annotation for each alternative allele.
+#'
+#' @param alt_allele Character vector of alternative allele that matches the
+#'   snpeff annotation (original allele, not re-referenced alternative allele).
+#'   Length = number of genotypes.
+#' @param snpeff_split List of character vectors. Each character vector contains
+#'   snpeff annotations extracted from vcf. Length(list) = number of genotypes.
+#'   Length(individual vector) = number of alternative alleles at that site.
+#'
+#' @return A list of two objects:
+#'   \describe{
+#'     \item{pred_impact}{Character vector. Predicted functional impact.
+#'     Length = number of alleles.}
+#'     \item{gene}{Character vector. Gene names (locus tag or symbols from
+#'     SnpEff annotation). Length = number of alleles.}
+#'   }
+#' @noRd
+parse_snpeff <- function(alt_allele, snpeff_split){
+  check_is_this_class(alt_allele, "character")
+  check_is_this_class(snpeff_split, "list")
+  check_is_this_class(snpeff_split[[1]], "character")
+
+  if (length(alt_allele) != length(snpeff_split)) {
+    stop("alt_allele and snpeff_split should have one entry per genotype")
+  }
+
+  pred_impact <- rep(NA, length(alt_allele))
+  gene <- rep(NA, length(alt_allele))
+
+  for (i in 1:length(alt_allele)) {
+    annot <-
+      snpeff_split[[i]][grep(paste0("^", alt_allele[i]), snpeff_split[[i]])]
+
+    if (length(annot) == 1) {
+      pred_impact[i] <- unlist(strsplit(annot, "[|]"))[3]
+      gene[i] <- unlist(strsplit(annot, "[|]"))[4]
+    } else if (length(annot) == 0) {
+      pred_impact[i] <- ""
+      gene[i] <- ""
+    } else {
+      multi_annots <-
+        unlist(strsplit(annot, ",")) # would occur if overlapping genes
+      pred_impact[i] <- paste(sapply(multi_annots, function(s) {
+        unlist(strsplit(s, "[|]"))[3]
+      }), collapse = "|")
+      gene[i] <- paste(sapply(multi_annots, function(s) {
+        unlist(strsplit(s, "[|]"))[4]
+      }), collapse = "|")
+    }
+  }
+
+  return(list(pred_impact = pred_impact,
+              gene = gene))
+
 }

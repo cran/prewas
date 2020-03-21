@@ -8,7 +8,9 @@
 #'   binary variant matrix, prewas can perform 3 pre-processing steps including:
 #'   dealing with  multiallelic SNPs, (optional) dealing with SNPs in
 #'   overlapping genes, and choosing a reference allele. prewas can output
-#'   matrices for use with both SNP-based bGWAS and gene-based bGWAS.
+#'   matrices for use with both SNP-based bGWAS and gene-based bGWAS. prewas can
+#'   also provide gene matrices for variants with specific SnpEff annotations
+#'   (Cingolani et al. 2012).
 #'
 #' @param dna `Character` or `vcfR`. Required input. Path to VCF4.1 file or
 #'   `vcfR` object.
@@ -26,7 +28,15 @@
 #' @param anc `Logical`. Optional input. When `TRUE` prewas performs ancestral
 #'   reconstruction. When `FALSE` prewas calculates the major allele. Defaults
 #'   to `TRUE`.
-#'
+#' @param snpeff_grouping `NULL`, `character`. Optional input. Only used when a
+#'   SnpEff annotated multivcf is inputted. Use when you want to group SNPs by
+#'   gene and SnpEff impact. If `NULL` no custom-grouped gene matrix will be
+#'   generated. Options for input are a vector combination of 'HIGH',
+#'   'MODERATE', LOW', 'MODIFER'. Must write the impact combinations in all caps
+#'   (e.g. c('HIGH', 'MODERATE')). Defaults to `NULL`.
+#' @param grp_nonref `Logical`. Optional input. When `TRUE` prewas collapses all
+#'   non-reference alleles for multi-allelic sites. When `FALSE` prewas keeps
+#'   multi-allelic sites separate. Defaults to `FALSE`.
 #' @return A list with the following items:
 #'   \describe{
 #'     \item{allele_mat}{`matrix`. An allele matrix, created from the vcf where
@@ -52,9 +62,17 @@
 #'     the row was replicated `x` times, where `x` is the number of alternative
 #'     alleles. Note: the multiple indices indicates multiallelic site splits,
 #'     not overlapping genes splits.}
-#'     \item{gene_mat}{`NULL` or `matrix`. `NULL` if no gene information
-#'     provided (`gff = NULL`). If gene information is provided, a gene matrix
-#'     is generated where each row is a gene and each column is a sample.}
+#'     \item{gene_mat}{`NULL` or `matrix` or `list`. `NULL` if no gene
+#'     information provided (`gff = NULL` and no SnpEff annotation provided in
+#'     VCF). If gene information is provided by a gff then a gene matrix is
+#'     generated where each row is a gene and each column is a sample. If gene
+#'     information is provided by a SnpEff annotated vcf then a list of up to
+#'     six gene matrices are returned. The first matrix, `gene_mat_all` is a
+#'     gene matrix for all variants.`gene_mat_modifier` is a gene matrix for
+#'     only variants annoted as MODIFIER by SnpEff. Similarly there is a
+#'     `gene_mat_low`, `gene_mat_moderate`, and `gene_mat_high.` If the user
+#'     asks for a combination SnpEff annotations the final `gene_mat_custom`
+#'     will contain that matrix.}
 #'     \item{tree}{`NULL` or `phylo`. If `anc = FALSE` no tree is use or
 #'     generated and the function returns `NULL`. If `anc = TRUE` and the user
 #'     provides a tree but no outgroup: the function returns the tree after
@@ -74,28 +92,49 @@
 #'                  tree = tree,
 #'                  outgroup = outgroup,
 #'                  gff = gff,
-#'                  anc = FALSE)
+#'                  anc = FALSE ,
+#'                  grp_nonref = FALSE)
 prewas <- function(dna,
                    tree = NULL,
                    outgroup = NULL,
                    gff = NULL,
-                   anc = TRUE){
+                   anc = TRUE,
+                   snpeff_grouping = NULL,
+                   grp_nonref = FALSE){
   # Check inputs ---------------------------------------------------------------
-  inputs <- format_inputs(dna, tree, outgroup, gff, anc)
+  inputs <-
+    format_inputs(dna, tree, outgroup, gff, anc, snpeff_grouping, grp_nonref)
   dna_mat <- inputs$dna
   tree <- inputs$tree
   outgroup_char <- inputs$outgroup
   gff_mat <- inputs$gff
+  o_ref <- inputs$o_ref
+  o_alt <- inputs$o_alt
+  snpeff <- inputs$snpeff
 
   # preprocess tree and dna_mat ------------------------------------------------
   if (anc) {
     tree <- root_tree(tree, outgroup_char)
     subsetted_data <- subset_tree_and_matrix(tree, dna_mat)
     tree <- subsetted_data$tree
-    allele_mat_only_var <- keep_only_variant_sites(subsetted_data$mat)
+    allele_mat_snpeff_only_var <- keep_only_variant_sites(subsetted_data$mat,
+                                                          o_ref,
+                                                          o_alt,
+                                                          snpeff)
+    allele_mat_only_var <- allele_mat_snpeff_only_var$variant_only_dna_mat
+    o_ref_only_var <- allele_mat_snpeff_only_var$o_ref_var_pos
+    o_alt_only_var <-  allele_mat_snpeff_only_var$o_alt_var_pos
+    snpeff_only_var <- allele_mat_snpeff_only_var$snpeff_var_pos
   } else {
     check_is_this_class(dna_mat, "matrix")
-    allele_mat_only_var <- keep_only_variant_sites(dna_mat)
+    allele_mat_snpeff_only_var <- keep_only_variant_sites(dna_mat,
+                                                          o_ref,
+                                                          o_alt,
+                                                          snpeff)
+    allele_mat_only_var <- allele_mat_snpeff_only_var$variant_only_dna_mat
+    o_ref_only_var <- allele_mat_snpeff_only_var$o_ref_var_pos
+    o_alt_only_var <-  allele_mat_snpeff_only_var$o_alt_var_pos
+    snpeff_only_var <- allele_mat_snpeff_only_var$snpeff_var_pos
   }
 
   # ancestral reconstruction ---------------------------------------------------
@@ -106,42 +145,90 @@ prewas <- function(dna,
     remove_unknown_anc_results <-
       remove_unknown_alleles(allele_mat_only_var,
                              allele_results$ancestral_allele,
-                             allele_results)
+                             allele_results,
+                             o_ref_only_var,
+                             o_alt_only_var,
+                             snpeff_only_var)
     allele_mat_only_var <- remove_unknown_anc_results$allele_mat
     allele_results <- remove_unknown_anc_results$ar_results
+    o_ref <- remove_unknown_anc_results$o_ref
+    o_alt <- remove_unknown_anc_results$o_alt
+    snpeff <- remove_unknown_anc_results$snpeff
   } else {
     alleles <- get_major_alleles(allele_mat_only_var)
     tree <- NULL
     allele_results <- data.frame(major_allele = alleles)
     rownames(allele_results) <- rownames(allele_mat_only_var)
+    allele_results$major_allele <- as.factor(allele_results$major_allele)
     remove_unknown_anc_results <-
       remove_unknown_alleles(allele_mat_only_var,
                              allele_results$major_allele,
-                             allele_results)
+                             allele_results,
+                             o_ref_only_var,
+                             o_alt_only_var,
+                             snpeff_only_var)
     allele_mat_only_var <- remove_unknown_anc_results$allele_mat
     allele_results <- remove_unknown_anc_results$ar_results
+    o_ref <- remove_unknown_anc_results$o_ref
+    o_alt <- remove_unknown_anc_results$o_alt
+    snpeff <- remove_unknown_anc_results$snpeff
   }
 
   # split multiallelic snps ----------------------------------------------------
   split <- split_multi_to_biallelic_snps(mat = allele_mat_only_var,
-                                        ar_results = allele_results)
+                                         o_ref = o_ref,
+                                         o_alt = o_alt,
+                                         ar_results = allele_results,
+                                         snpeff = snpeff)
 
   allele_mat_split <- split$mat_split
   allele_results_split <- split$ar_results_split
+  snpeff_split <- split$snpeff_split
   split_rows_flag <- split$split_rows_flag
+  o_ref_split <- split$o_ref_split
+  o_alt_split <- split$o_alt_split
 
   if (anc) {
-    alleles <- allele_results_split$ancestral_allele
-    names(alleles) <- rownames(allele_results_split)
+    n_ref <- allele_results_split$ancestral_allele
+    names(n_ref) <- rownames(allele_results_split)
   } else {
-    alleles <- allele_results_split$major_allele
-    names(alleles) <- rownames(allele_results_split)
+    n_ref <- allele_results_split$major_allele
+    names(n_ref) <- rownames(allele_results_split)
   }
 
-  # reference to ancestral state -----------------------------------------------
-  bin_mat <- make_binary_matrix(allele_mat_split, alleles)
+  # reference to reference allele ----------------------------------------------
+  bin_mat_results <- make_binary_matrix(allele_mat_split,
+                                        o_ref_split,
+                                        n_ref,
+                                        o_alt_split)
+  bin_mat <- bin_mat_results[[1]]
+  n_alt <- bin_mat_results[[2]] # new alternative allele, after splitting
 
-  if (!is.null(gff_mat)) {
+  # snpeff ---------------------------------------------------------------------
+
+
+  if (!is.null(snpeff_split)) {
+    if (!is.null(gff_mat)) {
+      warning("GFF is not being used; annotations are coming from vcf file")
+    }
+
+    snpeff_parsed <- parse_snpeff(o_alt_split, snpeff_split)
+    predicted_impact <- snpeff_parsed$pred_impact
+    gene <- snpeff_parsed$gene
+
+    output <- dup_snps_in_overlapping_genes_snpeff(bin_mat,
+                                                   predicted_impact,
+                                                   gene)
+    bin_mat <- output$bin_mat_dup
+    predicted_impact_split <- output$predicted_impact_split
+
+    # collapse snps by gene and impact -----------------------------------------
+    gene_names <- get_gene_names(bin_mat)
+    gene_mat <- collapse_snps_into_genes_by_impact(bin_mat,
+                                                   gene_names,
+                                                   predicted_impact_split,
+                                                   snpeff_grouping)
+  }else if (!is.null(gff_mat)) {
     # overlapping genes --------------------------------------------------------
     bin_mat <- dup_snps_in_overlapping_genes(bin_mat, gff_mat)
 
@@ -150,6 +237,19 @@ prewas <- function(dna,
     gene_mat <- collapse_snps_into_genes(bin_mat, gene_names)
   } else {
     gene_mat <- NULL
+  }
+
+  if (!is.null(snpeff_split) & grp_nonref) {
+    allele_names <- get_allele_names(bin_mat)
+    bin_mat <- collapse_snps_into_genes_by_impact(bin_mat,
+                                                  allele_names,
+                                                  predicted_impact_split,
+                                                  snpeff_grouping)
+  } else if (grp_nonref) {
+    # collapse variants by position --------------------------------------------
+    allele_names <- get_allele_names(bin_mat)
+    bin_mat <- collapse_snps_into_genes(bin_mat, allele_names)
+
   }
 
   return(list(allele_mat = allele_mat_split,

@@ -57,3 +57,15 @@ results_no_tree = prewas(dna = vcf,
 ## -----------------------------------------------------------------------------
 results_no_tree$tree
 
+## -----------------------------------------------------------------------------
+results_snpeff = prewas(dna = snpeff_vcf, anc = FALSE)
+names(results_snpeff$gene_mat)
+
+## -----------------------------------------------------------------------------
+results_snpeff_custom = prewas(dna = snpeff_vcf, snpeff_grouping = c('MODERATE','HIGH'), anc = FALSE)
+names(results_snpeff_custom$gene_mat)
+head(results_snpeff_custom$gene_mat$gene_mat_custom)
+
+## ----results_ma, warning = FALSE----------------------------------------------
+results_ma = prewas(dna = vcf, grp_nonref = TRUE, anc = FALSE)
+
